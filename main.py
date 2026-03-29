@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 import torch
 import torch.nn as nn
 from torchvision import models, transforms
@@ -109,3 +109,58 @@ async def detect_video(file: UploadFile = File(...)):
         "confidence": float(score),
         "frames": heatmaps  # SAME STYLE AS IMAGE HEATMAP
     }
+
+    from fastapi import HTTPException
+from pydantic import BaseModel
+from passlib.context import CryptContext
+from jose import jwt
+from datetime import datetime, timedelta
+
+SECRET_KEY = "secret123"
+ALGORITHM = "HS256"
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# temporary database
+users_db = {}
+
+class User(BaseModel):
+    username: str
+    password: str
+
+def hash_password(password):
+    return pwd_context.hash(password[:72])
+
+def verify_password(password, hashed):
+    return pwd_context.verify(password, hashed)
+
+def create_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(hours=2)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+# SIGNUP
+@app.post("/signup")
+def signup(user: User):
+
+    if user.username in users_db:
+        raise HTTPException(status_code=400, detail="User already exists")
+
+    users_db[user.username] = hash_password(user.password)
+
+    return {"message": "User created successfully"}
+
+# LOGIN
+@app.post("/login")
+def login(user: User):
+
+    if user.username not in users_db:
+        raise HTTPException(status_code=400, detail="User not found")
+
+    if not verify_password(user.password, users_db[user.username]):
+        raise HTTPException(status_code=400, detail="Wrong password")
+
+    token = create_token({"sub": user.username})
+
+    return {"access_token": token}
