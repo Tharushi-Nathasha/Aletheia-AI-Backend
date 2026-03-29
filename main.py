@@ -8,13 +8,14 @@ from video_detector import analyze_video
 import shutil
 from gradcam import generate_gradcam
 import base64
-
 import cv2
 import numpy as np
 
-app = FastAPI()
-
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from passlib.context import CryptContext
+from jose import jwt
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
@@ -26,7 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-#  MODEL ARCHITECTURE 
+# MODEL ARCHITECTURE
 class AletheiaModel(nn.Module):
     def __init__(self):
         super().__init__()
@@ -34,41 +35,39 @@ class AletheiaModel(nn.Module):
         self.backbone.classifier = nn.Identity()
 
         self.fc = nn.Sequential(
-            nn.Linear(1536,512),
+            nn.Linear(1536, 512),
             nn.ReLU(),
             nn.Dropout(0.4),
-            nn.Linear(512,1)
+            nn.Linear(512, 1)
         )
 
-    def forward(self,x):
+    def forward(self, x):
         x = self.backbone(x)
         x = self.fc(x)
         return x
 
-#  LOAD MODEL 
+# LOAD MODEL
 model = AletheiaModel()
 model.load_state_dict(torch.load("models/celebdf_final_model.pth", map_location="cpu"))
 model.eval()
 
-# IMAGE TRANSFORM 
+# IMAGE TRANSFORM
 transform = transforms.Compose([
-    transforms.Resize((300,300)),
+    transforms.Resize((300, 300)),
     transforms.ToTensor(),
     transforms.Normalize(
-        [0.485,0.456,0.406],
-        [0.229,0.224,0.225]
+        [0.485, 0.456, 0.406],
+        [0.229, 0.224, 0.225]
     )
 ])
 
-# API ENDPOINT 
+# IMAGE API
 @app.post("/detect-image")
 async def detect_image(file: UploadFile = File(...)):
-
     image_bytes = await file.read()
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
     image_resized = image.resize((300, 300))
-
     image_tensor = transform(image).unsqueeze(0)
 
     with torch.no_grad():
@@ -77,12 +76,10 @@ async def detect_image(file: UploadFile = File(...)):
 
     prediction = "FAKE" if score >= 0.6 else "REAL"
 
-    # Grad-CAM
     cam = generate_gradcam(model, image_tensor)
 
     heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
     original = np.array(image_resized)
-
     overlay = cv2.addWeighted(original, 0.6, heatmap, 0.4, 0)
 
     _, buffer = cv2.imencode('.jpg', overlay)
@@ -94,9 +91,9 @@ async def detect_image(file: UploadFile = File(...)):
         "heatmap": heatmap_base64
     }
 
+# VIDEO API
 @app.post("/detect-video")
 async def detect_video(file: UploadFile = File(...)):
-
     temp_path = f"temp_{file.filename}"
 
     with open(temp_path, "wb") as buffer:
@@ -107,21 +104,15 @@ async def detect_video(file: UploadFile = File(...)):
     return {
         "prediction": prediction,
         "confidence": float(score),
-        "frames": heatmaps  # SAME STYLE AS IMAGE HEATMAP
+        "frames": heatmaps
     }
 
-    from fastapi import HTTPException
-from pydantic import BaseModel
-from passlib.context import CryptContext
-from jose import jwt
-from datetime import datetime, timedelta
-
+# AUTH
 SECRET_KEY = "secret123"
 ALGORITHM = "HS256"
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# temporary database
 users_db = {}
 
 class User(BaseModel):
@@ -143,7 +134,6 @@ def create_token(data: dict):
 # SIGNUP
 @app.post("/signup")
 def signup(user: User):
-
     if user.username in users_db:
         raise HTTPException(status_code=400, detail="User already exists")
 
@@ -154,7 +144,6 @@ def signup(user: User):
 # LOGIN
 @app.post("/login")
 def login(user: User):
-
     if user.username not in users_db:
         raise HTTPException(status_code=400, detail="User not found")
 
