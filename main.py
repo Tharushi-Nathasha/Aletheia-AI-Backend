@@ -4,12 +4,10 @@ import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
 import io
-from video_detector import analyze_video
 import shutil
-from gradcam import generate_gradcam
-import base64
 import cv2
 import numpy as np
+import base64
 
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -17,8 +15,12 @@ from passlib.context import CryptContext
 from jose import jwt
 from datetime import datetime, timedelta
 
+from video_detector import analyze_video
+from gradcam import generate_gradcam
+
 app = FastAPI()
 
+# ---------------- CORS ----------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,7 +29,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MODEL ARCHITECTURE
+# ---------------- MODEL ----------------
 class AletheiaModel(nn.Module):
     def __init__(self):
         super().__init__()
@@ -46,12 +48,11 @@ class AletheiaModel(nn.Module):
         x = self.fc(x)
         return x
 
-# LOAD MODEL
 model = AletheiaModel()
 model.load_state_dict(torch.load("models/celebdf_final_model.pth", map_location="cpu"))
 model.eval()
 
-# IMAGE TRANSFORM
+# ---------------- TRANSFORM ----------------
 transform = transforms.Compose([
     transforms.Resize((300, 300)),
     transforms.ToTensor(),
@@ -61,11 +62,31 @@ transform = transforms.Compose([
     )
 ])
 
-# IMAGE API
+# ---------------- FACE DETECTION ----------------
+def detect_face(image_np):
+    face_cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    )
+
+    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+
+    return len(faces) > 0
+
+# ---------------- IMAGE API ----------------
 @app.post("/detect-image")
 async def detect_image(file: UploadFile = File(...)):
+
     image_bytes = await file.read()
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+    image_np = np.array(image)
+
+    # 🔥 VALIDATION
+    if not detect_face(image_np):
+        return {
+            "error": "No human face detected. Please upload a clear image containing a face."
+        }
 
     image_resized = image.resize((300, 300))
     image_tensor = transform(image).unsqueeze(0)
@@ -91,9 +112,10 @@ async def detect_image(file: UploadFile = File(...)):
         "heatmap": heatmap_base64
     }
 
-# VIDEO API
+# ---------------- VIDEO API ----------------
 @app.post("/detect-video")
 async def detect_video(file: UploadFile = File(...)):
+
     temp_path = f"temp_{file.filename}"
 
     with open(temp_path, "wb") as buffer:
@@ -107,7 +129,7 @@ async def detect_video(file: UploadFile = File(...)):
         "frames": heatmaps
     }
 
-# AUTH
+# ---------------- AUTH ----------------
 SECRET_KEY = "secret123"
 ALGORITHM = "HS256"
 
@@ -131,17 +153,14 @@ def create_token(data: dict):
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-# SIGNUP
 @app.post("/signup")
 def signup(user: User):
     if user.username in users_db:
         raise HTTPException(status_code=400, detail="User already exists")
 
     users_db[user.username] = hash_password(user.password)
-
     return {"message": "User created successfully"}
 
-# LOGIN
 @app.post("/login")
 def login(user: User):
     if user.username not in users_db:
