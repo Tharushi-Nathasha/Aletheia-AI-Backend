@@ -8,17 +8,14 @@ from video_detector import analyze_video
 import shutil
 from gradcam import generate_gradcam
 import base64
+
 import cv2
 import numpy as np
-import os
+
+app = FastAPI()
 
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from passlib.context import CryptContext
-from jose import jwt
-from datetime import datetime, timedelta
 
-# ================== APP ==================
 app = FastAPI()
 
 app.add_middleware(
@@ -29,12 +26,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ================== ROOT ==================
-@app.get("/")
-def home():
-    return {"message": "Aletheia backend is running 🚀"}
-
-# ================== MODEL ==================
+#  MODEL ARCHITECTURE 
 class AletheiaModel(nn.Module):
     def __init__(self):
         super().__init__()
@@ -42,111 +34,94 @@ class AletheiaModel(nn.Module):
         self.backbone.classifier = nn.Identity()
 
         self.fc = nn.Sequential(
-            nn.Linear(1536, 512),
+            nn.Linear(1536,512),
             nn.ReLU(),
             nn.Dropout(0.4),
-            nn.Linear(512, 1)
+            nn.Linear(512,1)
         )
 
-    def forward(self, x):
+    def forward(self,x):
         x = self.backbone(x)
         x = self.fc(x)
         return x
 
-model = None
+#  LOAD MODEL 
+model = AletheiaModel()
+model.load_state_dict(torch.load("models/celebdf_final_model.pth", map_location="cpu"))
+model.eval()
 
-def get_model():
-    global model
-    if model is None:
-        try:
-            model_path = "models/celebdf_final_model.pth"
-
-            if not os.path.exists(model_path):
-                raise Exception("Model file not found")
-
-            model = AletheiaModel()
-            model.load_state_dict(torch.load(model_path, map_location="cpu"))
-            model.eval()
-
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Model loading failed: {str(e)}")
-
-    return model
-
-# ================== TRANSFORM ==================
+# IMAGE TRANSFORM 
 transform = transforms.Compose([
-    transforms.Resize((300, 300)),
+    transforms.Resize((300,300)),
     transforms.ToTensor(),
     transforms.Normalize(
-        [0.485, 0.456, 0.406],
-        [0.229, 0.224, 0.225]
+        [0.485,0.456,0.406],
+        [0.229,0.224,0.225]
     )
 ])
 
-# ================== IMAGE API ==================
+# API ENDPOINT 
 @app.post("/detect-image")
 async def detect_image(file: UploadFile = File(...)):
-    try:
-        model = get_model()
 
-        image_bytes = await file.read()
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image_bytes = await file.read()
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-        image_resized = image.resize((300, 300))
-        image_tensor = transform(image).unsqueeze(0)
+    image_resized = image.resize((300, 300))
 
-        with torch.no_grad():
-            output = model(image_tensor)
-            score = torch.sigmoid(output).item()
+    image_tensor = transform(image).unsqueeze(0)
 
-        prediction = "FAKE" if score >= 0.6 else "REAL"
+    with torch.no_grad():
+        output = model(image_tensor)
+        score = torch.sigmoid(output).item()
 
-        cam = generate_gradcam(model, image_tensor)
+    prediction = "FAKE" if score >= 0.6 else "REAL"
 
-        heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
-        original = np.array(image_resized)
-        overlay = cv2.addWeighted(original, 0.6, heatmap, 0.4, 0)
+    # Grad-CAM
+    cam = generate_gradcam(model, image_tensor)
 
-        _, buffer = cv2.imencode('.jpg', overlay)
-        heatmap_base64 = base64.b64encode(buffer).decode("utf-8")
+    heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
+    original = np.array(image_resized)
 
-        return {
-            "prediction": prediction,
-            "confidence": float(score),
-            "heatmap": heatmap_base64
-        }
+    overlay = cv2.addWeighted(original, 0.6, heatmap, 0.4, 0)
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    _, buffer = cv2.imencode('.jpg', overlay)
+    heatmap_base64 = base64.b64encode(buffer).decode("utf-8")
 
-# ================== VIDEO API ==================
+    return {
+        "prediction": prediction,
+        "confidence": float(score),
+        "heatmap": heatmap_base64
+    }
+
 @app.post("/detect-video")
 async def detect_video(file: UploadFile = File(...)):
-    try:
-        model = get_model()
 
-        temp_path = f"temp_{file.filename}"
+    temp_path = f"temp_{file.filename}"
 
-        with open(temp_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+    with open(temp_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
-        prediction, score, heatmaps = analyze_video(temp_path, model)
+    prediction, score, heatmaps = analyze_video(temp_path, model)
 
-        return {
-            "prediction": prediction,
-            "confidence": float(score),
-            "frames": heatmaps
-        }
+    return {
+        "prediction": prediction,
+        "confidence": float(score),
+        "frames": heatmaps  # SAME STYLE AS IMAGE HEATMAP
+    }
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    from fastapi import HTTPException
+from pydantic import BaseModel
+from passlib.context import CryptContext
+from jose import jwt
+from datetime import datetime, timedelta
 
-# ================== AUTH ==================
 SECRET_KEY = "secret123"
 ALGORITHM = "HS256"
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# temporary database
 users_db = {}
 
 class User(BaseModel):
@@ -165,8 +140,10 @@ def create_token(data: dict):
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
+# SIGNUP
 @app.post("/signup")
 def signup(user: User):
+
     if user.username in users_db:
         raise HTTPException(status_code=400, detail="User already exists")
 
@@ -174,8 +151,10 @@ def signup(user: User):
 
     return {"message": "User created successfully"}
 
+# LOGIN
 @app.post("/login")
 def login(user: User):
+
     if user.username not in users_db:
         raise HTTPException(status_code=400, detail="User not found")
 
