@@ -1,14 +1,18 @@
 import cv2
 import torch
+import base64
+import numpy as np
 from PIL import Image
 from torchvision import transforms
 
+from gradcam import generate_gradcam
+
 transform = transforms.Compose([
-    transforms.Resize((300,300)),
+    transforms.Resize((300, 300)),
     transforms.ToTensor(),
     transforms.Normalize(
-        [0.485,0.456,0.406],
-        [0.229,0.224,0.225]
+        [0.485, 0.456, 0.406],
+        [0.229, 0.224, 0.225]
     )
 ])
 
@@ -26,8 +30,8 @@ def analyze_video(video_path, model):
         if not ret:
             break
 
-        # sample every 10th frame
-        if frame_count % 10 == 0:
+        # SAMPLE EVERY 20 FRAMES (FAST)
+        if frame_count % 20 == 0:
 
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             image = Image.fromarray(rgb_frame)
@@ -35,13 +39,13 @@ def analyze_video(video_path, model):
             image_resized = image.resize((300, 300))
             image_tensor = transform(image).unsqueeze(0)
 
-            # 🔹 Prediction (NO no_grad for Grad-CAM compatibility)
-            output = model(image_tensor)
-            score = torch.sigmoid(output).item()
+            with torch.no_grad():
+                output = model(image_tensor)
+                score = torch.sigmoid(output).item()
 
             frame_scores.append(score)
 
-            # Grad-CAM (same as image endpoint)
+            #  ALWAYS GENERATE HEATMAP (FIX)
             cam = generate_gradcam(model, image_tensor)
 
             heatmap = cv2.applyColorMap(
@@ -53,7 +57,6 @@ def analyze_video(video_path, model):
 
             overlay = cv2.addWeighted(original, 0.6, heatmap, 0.4, 0)
 
-            # convert to base64 (same as image endpoint)
             _, buffer = cv2.imencode('.jpg', overlay)
             heatmap_base64 = base64.b64encode(buffer).decode("utf-8")
 
@@ -73,11 +76,11 @@ def analyze_video(video_path, model):
     avg_score = sum(frame_scores) / len(frame_scores)
     prediction = "FAKE" if avg_score >= 0.6 else "REAL"
 
-    # take top 5 most suspicious frames
+    #  TOP 3 FRAMES ONLY (FAST + CLEAN)
     heatmap_frames = sorted(
         heatmap_frames,
         key=lambda x: x["score"],
         reverse=True
-    )[:5]
+    )[:3]
 
     return prediction, avg_score, heatmap_frames

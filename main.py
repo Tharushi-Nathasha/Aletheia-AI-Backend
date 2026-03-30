@@ -8,6 +8,7 @@ import shutil
 import cv2
 import numpy as np
 import base64
+import os
 
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -78,15 +79,20 @@ def detect_face(image_np):
 async def detect_image(file: UploadFile = File(...)):
 
     image_bytes = await file.read()
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+    try:
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except:
+        raise HTTPException(status_code=400, detail="Invalid image file.")
 
     image_np = np.array(image)
 
-    # 🔥 VALIDATION
+    # FACE VALIDATION
     if not detect_face(image_np):
-        return {
-            "error": "No human face detected. Please upload a clear image containing a face."
-        }
+        raise HTTPException(
+            status_code=400,
+            detail="No human face detected. Please upload a clear image containing a face."
+        )
 
     image_resized = image.resize((300, 300))
     image_tensor = transform(image).unsqueeze(0)
@@ -118,16 +124,24 @@ async def detect_video(file: UploadFile = File(...)):
 
     temp_path = f"temp_{file.filename}"
 
-    with open(temp_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    try:
+        # SAVE TEMP VIDEO
+        with open(temp_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
 
-    prediction, score, heatmaps = analyze_video(temp_path, model)
+        # PROCESS VIDEO
+        prediction, score, heatmaps = analyze_video(temp_path, model)
 
-    return {
-        "prediction": prediction,
-        "confidence": float(score),
-        "frames": heatmaps
-    }
+        return {
+            "prediction": prediction,
+            "confidence": float(score),
+            "frames": heatmaps
+        }
+
+    finally:
+        # AUTO DELETE FILE
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 # ---------------- AUTH ----------------
 SECRET_KEY = "secret123"
@@ -153,16 +167,21 @@ def create_token(data: dict):
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
+# ---------------- SIGNUP ----------------
 @app.post("/signup")
 def signup(user: User):
+
     if user.username in users_db:
         raise HTTPException(status_code=400, detail="User already exists")
 
     users_db[user.username] = hash_password(user.password)
+
     return {"message": "User created successfully"}
 
+# ---------------- LOGIN ----------------
 @app.post("/login")
 def login(user: User):
+
     if user.username not in users_db:
         raise HTTPException(status_code=400, detail="User not found")
 
